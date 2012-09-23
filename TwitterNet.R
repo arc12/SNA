@@ -5,6 +5,7 @@
 ##
 library("network")
 library("twitteR")
+library("RSQLite")
 
 ## !!!!!!!!!!!!
 ## NB
@@ -14,6 +15,7 @@ library("twitteR")
 # NB2: This code may not fully take account of twitter API rate limits (150/hr).
 #  (so may fail for large follower counts, for example)
 # NB3: Does not make authenticated access, which will limit visibility (and rate limits below 350/hr)
+# NB4: Caches data to a SQLite database and uses cached data if within cache.life age limit
 
 ## ****************
 ## RUN PARAMS
@@ -24,9 +26,14 @@ library("twitteR")
 # "user-tags" - obtains a set of hash tags according to those used by a specified set of users
 #                 (overrides the hash.tags parameter)
 run.type<-"users"
+# Use cache values if <= cache.life days old. A value less than zero disables any database use
+# The cached data is a user's attributes and all followers/friends.
+cache.life<--1
+#name of the SQLite database file to use
+cache.db.filename<-"/home/arc1/R Projects/SNA/Source Data/TwitterNet.sqlite"
 # >>>> parameters if type="users"
 # which twitter screen names to use as the start-point from which to explore followers/following
-start.sns<- c("jisccetis")
+start.sns<- c("asimong")
 #c("LornaMCampbell","asimong","mhawksey","PaulHollins","wilm","sheilmcn","dwrgi","markpower","christismart","scottbw") #cetis staff
 # c("jisccetis") # CETIS comms account
 # how many edges to traverse to locate nodes (i.e. depth). 0 means only use start.ids
@@ -51,10 +58,23 @@ output.dir<-"/home/arc1/R Projects/SNA Output/TwitterNet"
 run.date <- as.POSIXlt(Sys.time(), "UTC")
 
 ## 
+## PRELIMINARIES
+##
 if(run.type!="users"){
    stop(" run.type NOT IMPLEMENTED")
 }
-##
+# database prep
+use.sqlite<-(cache.life>=0)
+if(use.sqlite){
+   # instantiate the SQLite driver in the R process
+   sqlite<- dbDriver("SQLite")
+   # open sqlite connection. db is a "connection"
+   db<- dbConnect(sqlite, dbname=cache.db.filename)
+   summary(db)
+}else{
+   db<-NA
+}
+
 
 ## *******************************
 ## FUNCTIONS
@@ -73,27 +93,60 @@ throttle<-function(margin=1){
 # lookupUsers in batches of 100 as required by the twitter API limits
 batchedLookupUsers<-function(ids){
    batches<-ceiling(length(ids)/100)
-   throttle()
-   users<-lookupUsers(ids[1:min(100,length(ids))])
+   users<-xLookupUsers(ids[1:min(100,length(ids))])
    if(batches>1){
       for(b in 2:batches){
-         throttle()
          from<-1+100*(b-1)
          to<-min(100*b,length(ids))
-         users<-c(users,lookupUsers(ids[from:to]))
+         users<-c(users,xLookupUsers(ids[from:to]))
       }
    }
    return(users)
 }
-# get followers for a user
+# lookupUsers with API hit throttling and retries
+xLookupUsers<-function(ids){
+   throttle()
+   tries<-0
+   done=FALSE
+   while(!done && tries<3){
+      val<-tryCatch(lookupUsers(ids),
+                    error=function(e) NULL)
+      done<-!is.null(val)
+      tries<-tries+1
+      Sys.sleep(1)
+   }
+   if(is.null(val))stop(geterrmessage())
+   return(val)
+}
+# get followers for a user with API hit throttling and retries
 ufol<-function(x){
    throttle()
-   x$getFollowerIDs()
+   tries<-0
+   done=FALSE
+   while(!done && tries<3){
+      val<-tryCatch(x$getFollowerIDs(),
+                    error=function(e) NULL)
+      done<-!is.null(val)
+      tries<-tries+1
+      Sys.sleep(1)
+   }
+   if(is.null(val))stop(geterrmessage())
+   return(val)
 }
 #get ids of people user is following
 ufri<-function(x){
    throttle()
-   x$getFriendIDs()
+   tries<-0
+   done=FALSE
+   while(!done && tries<3){
+      val<-tryCatch(x$getFriendIDs(),
+                    error=function(e) NULL)
+      done<-!is.null(val)
+      tries<-tries+1
+      Sys.sleep(1)
+   }
+   if(is.null(val))stop(geterrmessage())
+   return(val)
 }
 uids<-function(x){x$getId()}
 
@@ -106,14 +159,23 @@ loop.ids<-sapply(lookupUsers(start.sns), uids)
 for(d in 0:depth){
    print(paste("Loop for depth = ",d,"out of", depth))
    print(paste(length(loop.ids), "users to fetch:", paste(loop.ids, collapse=",")))
-   #node info as data frame
+   #node info as data frame (using only a subset of what is available)
    loop.users<-batchedLookupUsers(loop.ids)
-   loop.users.df<-twListToDF(loop.users)   
-   #edge precursors as a list of vectors containing twitter IDs for each loop user
-   print("Getting followers")
-   loop.followers<-lapply(loop.users, ufol)
-   print("Getting friends")
-   loop.following<-lapply(loop.users, ufri)
+   loop.users.df<-twListToDF(loop.users)[c("description","statusesCount","name","created","screenName","location","id")]
+   #build a list of vectors containing twitter IDs for each loop user
+   # could also be done with loop.followers<-lapply(loop.users, ufol) but I want to watch progress of API calls
+   loop.following<-list()
+   loop.followers<-list()
+   for(u in loop.users){
+      print(paste("For user id=",u[["id"]]))
+      print("Getting friends")
+      loop.following<-c(loop.following, list(ufri(u)))
+      print("Getting followers")
+      loop.followers<-c(loop.followers, list(ufol(u)))
+   }
+   names(loop.followers)<-loop.ids
+   names(loop.following)<-loop.ids
+   
    
    #accumulate loop data A - the users
    if(d==0){
@@ -159,9 +221,14 @@ for(d in 0:depth){
    }
 }
 
-
+# Twitter API Info
 zz<-getCurRateLimitInfo()  
 print(paste("Finished using Twitter API:",zz$getRemainingHits(),"requests out of", zz$getHourlyLimit(), "remaining"))
+
+#close the SQLite database
+if(use.sqlite){
+   dbDisconnect(db)
+}
 
 
 ## ************************
@@ -216,3 +283,5 @@ cat(paste("\r\nstart.sns",start.sns,sep="= "))
 cat(paste("\r\ndepth",depth,sep="= "))
 cat(paste("\r\nhash.tags",hash.tags,sep="= "))
 sink()#close
+
+
