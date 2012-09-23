@@ -28,7 +28,7 @@ library("RSQLite")
 run.type<-"users"
 # Use cache values if <= cache.life days old. A value less than zero disables any database use
 # The cached data is a user's attributes and all followers/friends.
-cache.life<--1
+cache.life<-14
 #name of the SQLite database file to use
 cache.db.filename<-"/home/arc1/R Projects/SNA/Source Data/TwitterNet.sqlite"
 # >>>> parameters if type="users"
@@ -63,23 +63,35 @@ run.date <- as.POSIXlt(Sys.time(), "UTC")
 if(run.type!="users"){
    stop(" run.type NOT IMPLEMENTED")
 }
+#API limit margin
+margin<-5
 # database prep
-use.sqlite<-(cache.life>=0)
-if(use.sqlite){
+use.cache<-FALSE
+if(cache.life>=0){
    # instantiate the SQLite driver in the R process
    sqlite<- dbDriver("SQLite")
    # open sqlite connection. db is a "connection"
    db<- dbConnect(sqlite, dbname=cache.db.filename)
    summary(db)
+   use.cache<-TRUE
 }else{
    db<-NA
 }
-
+#cache earliest date
+cache.date<-NULL
+if(use.cache){
+   cache.date<-as.POSIXlt(Sys.Date())
+   cache.date$mday<-cache.date$mday-cache.life
+}
 
 ## *******************************
 ## FUNCTIONS
 ## (including throttling according to twitter api limits)
 ## *******************************
+#get a quoted date for SQL
+q4sql<-function(d){
+   return (paste("'",as.character(d),"'", sep=""))
+}
 # throttle will force delay when the twitter request rate limits are reached. margin is the number of remaining hits at which a delay is inserted.
 throttle<-function(margin=1){
    zz<-getCurRateLimitInfo()
@@ -91,17 +103,33 @@ throttle<-function(margin=1){
    }
 }
 # lookupUsers in batches of 100 as required by the twitter API limits
+# this will check whether any of the passed IDS have cached data
+#returns a list: "users" contains what has been looked up from API (user objects) and "cached" is the ids that were not looked up
 batchedLookupUsers<-function(ids){
-   batches<-ceiling(length(ids)/100)
-   users<-xLookupUsers(ids[1:min(100,length(ids))])
-   if(batches>1){
-      for(b in 2:batches){
-         from<-1+100*(b-1)
-         to<-min(100*b,length(ids))
-         users<-c(users,xLookupUsers(ids[from:to]))
+   cache.hit.ids<-NULL
+   users<-NULL
+   #check for cache hits
+   if(use.cache){
+      sql<-paste("SELECT id FROM user WHERE cache_date >=",q4sql(cache.date),"AND id IN(",paste(ids, collapse=","),")")
+      cache.hit.ids = dbGetQuery(db,sql)[,"id"]
+      #remove the cached ones from what will be looked up
+      if(length(cache.hit.ids)>0){
+         ids<-ids[-(ids%in%cache.hit.ids)]
       }
    }
-   return(users)
+   if(length(ids)>0){
+      print("Batched Loop-up User(s)")
+      batches<-ceiling(length(ids)/100)
+      users<-xLookupUsers(ids[1:min(100,length(ids))])
+      if(batches>1){
+         for(b in 2:batches){
+            from<-1+100*(b-1)
+            to<-min(100*b,length(ids))
+            users<-c(users,xLookupUsers(ids[from:to]))
+         }
+      }
+   }
+   list(users=users, cached=cache.hit.ids)
 }
 # lookupUsers with API hit throttling and retries
 xLookupUsers<-function(ids){
@@ -150,6 +178,88 @@ ufri<-function(x){
 }
 uids<-function(x){x$getId()}
 
+## database lookups
+cache.read.users<-function(ids){
+   sql<-paste("SELECT description, status_count as statusesCount, name, created, screen_name as screenName, location, id FROM user WHERE id IN(",paste(ids, collapse=","),")")
+   return(dbGetQuery(db,sql))
+}
+cache.read.following<-function(ids){
+   sql<-paste("SELECT followed_id as id FROM relation WHERE follower_id IN(",paste(ids, collapse=","),")")
+   return(dbGetQuery(db,sql)[,"id"])
+}
+cache.read.followers<-function(ids){
+   sql<-paste("SELECT follower_id as id FROM relation WHERE followed_id IN(",paste(ids, collapse=","),")")
+   return(dbGetQuery(db,sql)[,"id"])
+}
+
+## database insert/update.
+didFail <- function(e){
+   print(paste("Caught an error. DB Exception No=",dbGetException(db)$errorNum, " ", dbGetException(db)$errorMsg, sep=""))
+   print("Roll-back:")
+   dbRollback(db)
+}
+# done as a single transaction since the "cache_date" refers to the user and all relations.
+#arguments are: a single user object, vectors of friends and followers
+update.cache<-function(u,ufri, ufol){
+   tryCatch({      
+      dbBeginTransaction(db)
+      tryCatch({
+         cache.insert.user(u)
+         tryCatch({
+            cache.insert.followers(u[["id"]], ufol)
+            tryCatch({
+               cache.insert.friends(u[["id"]], ufri)
+               dbCommit(db)
+               }, error = didFail)
+            }, error = didFail)
+         }, error = didFail)
+
+   }, error = didFail)
+} 
+cache.insert.user<-function(u){
+   #use a prepared query style since description may contain characters that will mess up SQL created with paste()
+   sqlTemplate<-paste("INSERT OR REPLACE INTO user",
+                  "(description, status_count, name, created, screen_name, location, id, cache_date)",
+                  "VALUES($description, $status_count, $name, $created, $screen_name, $location, $id, $cache_date)")
+   df<-data.frame(description=u[["description"]],
+                  status_count=u[["statusesCount"]],
+                  name=u[["name"]],
+                  created=u[["created"]],
+                  screen_name=u[["screenName"]],
+                  location=u[["location"]],
+                  id=u[["id"]],
+                  cache_date=Sys.Date(),
+                  stringsAsFactors=FALSE)
+   dbSendPreparedQuery(db, sqlTemplate, bind.data = df)
+}
+# q4sql(u[["description"]]),",",
+# u[["statusesCount"]],",",
+# q4sql(u[["name"]]),",",
+# q4sql(u[["created"]]),",",
+# q4sql(u[["screenName"]]),",",
+# q4sql(u[["location"]]),",",
+# q4sql(u[["id"]]),",",
+# q4sql(Sys.Date()),
+cache.insert.followers<-function(uid, ids){
+   #remove all existing followers (some people may have stopped)
+   sql.clear<-paste("DELETE FROM relation WHERE followed_id =", as.character(uid))
+   dbSendQuery(db,sql.clear)
+   #repopulate followers
+   sqlTemplate<-"INSERT INTO relation (follower_id, followed_id) VALUES ($follower, $followed)"
+   df<-data.frame(follower=ids,  followed=rep(uid,length(ids)))
+   dbSendPreparedQuery(db, sqlTemplate, bind.data = df)
+}
+cache.insert.friends<-function(uid, ids){
+   #remove all existing friends (user may have stopped following some people)
+   sql.clear<-paste("DELETE FROM relation WHERE follower_id =", as.character(uid))
+   dbSendQuery(db,sql.clear)
+   #repopulate followers
+   sqlTemplate<-"INSERT INTO relation (follower_id, followed_id) VALUES ($follower, $followed)"
+   df<-data.frame(follower=rep(uid,length(ids)),  followed=ids)
+   dbSendPreparedQuery(db, sqlTemplate, bind.data = df)
+}
+
+
 ## *******************************
 ## MAIN - RUN.TYPE = "USERS"
 ## *******************************
@@ -157,25 +267,42 @@ uids<-function(x){x$getId()}
 loop.ids<-sapply(lookupUsers(start.sns), uids)
 ## Loop to required depth
 for(d in 0:depth){
-   print(paste("Loop for depth = ",d,"out of", depth))
-   print(paste(length(loop.ids), "users to fetch:", paste(loop.ids, collapse=",")))
-   #node info as data frame (using only a subset of what is available)
-   loop.users<-batchedLookupUsers(loop.ids)
-   loop.users.df<-twListToDF(loop.users)[c("description","statusesCount","name","created","screenName","location","id")]
-   #build a list of vectors containing twitter IDs for each loop user
-   # could also be done with loop.followers<-lapply(loop.users, ufol) but I want to watch progress of API calls
+   loop.users.df<-data.frame()
    loop.following<-list()
    loop.followers<-list()
-   for(u in loop.users){
-      print(paste("For user id=",u[["id"]]))
-      print("Getting friends")
-      loop.following<-c(loop.following, list(ufri(u)))
-      print("Getting followers")
-      loop.followers<-c(loop.followers, list(ufol(u)))
+   print(paste("Loop for depth = ",d,"out of", depth))
+   print(paste(length(loop.ids), "users to fetch:", paste(loop.ids, collapse=",")))
+   # NODE INFO as data frame (using only a subset of what is available).
+   #first fetch users from the API, skipping any that are cached
+   lu<-batchedLookupUsers(loop.ids)
+   #deal with cached users - look up their attributes and followers/friends info
+   if(length(lu$cached)>0){
+      loop.users.df<-cache.read.users(lu$cached)
+      loop.following<-list(cache.read.following(lu$cached))
+      loop.followers<-list(cache.read.followers(lu$cached))
    }
-   names(loop.followers)<-loop.ids
-   names(loop.following)<-loop.ids
-   
+   #now deal with uncached users - extract attributes
+   loop.users.uncached<-lu$users
+   if(length(loop.users.uncached)>0){
+      loop.users.df<-rbind(loop.users.df,twListToDF(loop.users.uncached)[c("description","statusesCount","name","created","screenName","location","id")])
+      # now look up followers/friends for uncached users
+      # build a list of vectors containing twitter IDs for each loop user
+      # could also be done with loop.followers<-lapply(loop.users, ufol) but I want to watch progress of API calls
+      for(u in loop.users.uncached){
+         print(paste("For user id=",u[["id"]]))
+         print("Getting friends")
+         u.friends<-ufri(u)
+         loop.following<-c(loop.following, list(u.friends))
+         print("Getting followers")
+         u.followers<-ufol(u)
+         loop.followers<-c(loop.followers, list(u.followers))
+         #save user and associated friends/followers to cache.
+         #NB: TO DO. this should remove any followed users that are not already known (i.e. are within the depth specified) on the last iteration (on non-final iterations we must retain the ids for the next loop)
+         update.cache(u,u.friends, u.followers)
+      }
+      names(loop.followers)<-loop.ids
+      names(loop.following)<-loop.ids
+   }
    
    #accumulate loop data A - the users
    if(d==0){
@@ -226,7 +353,7 @@ zz<-getCurRateLimitInfo()
 print(paste("Finished using Twitter API:",zz$getRemainingHits(),"requests out of", zz$getHourlyLimit(), "remaining"))
 
 #close the SQLite database
-if(use.sqlite){
+if(use.cache){
    dbDisconnect(db)
 }
 
