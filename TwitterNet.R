@@ -33,7 +33,7 @@ cache.life<-14
 cache.db.filename<-"/home/arc1/R Projects/SNA/Source Data/TwitterNet.sqlite"
 # >>>> parameters if type="users"
 # which twitter screen names to use as the start-point from which to explore followers/following
-start.sns<- c("asimong")
+start.sns<- c("christismart")
 #c("LornaMCampbell","asimong","mhawksey","PaulHollins","wilm","sheilmcn","dwrgi","markpower","christismart","scottbw") #cetis staff
 # c("jisccetis") # CETIS comms account
 # how many edges to traverse to locate nodes (i.e. depth). 0 means only use start.ids
@@ -63,8 +63,6 @@ run.date <- as.POSIXlt(Sys.time(), "UTC")
 if(run.type!="users"){
    stop(" run.type NOT IMPLEMENTED")
 }
-#API limit margin
-margin<-5
 # database prep
 use.cache<-FALSE
 if(cache.life>=0){
@@ -93,13 +91,14 @@ q4sql<-function(d){
    return (paste("'",as.character(d),"'", sep=""))
 }
 # throttle will force delay when the twitter request rate limits are reached. margin is the number of remaining hits at which a delay is inserted.
-throttle<-function(margin=1){
+throttle<-function(margin=5){
    zz<-getCurRateLimitInfo()
+   print(paste("Check Throttle:",zz$getRemainingHits(),"requests remaining out of", zz$getHourlyLimit(), "limit"))
    while(zz$getRemainingHits()<=margin){
       print("Twitter rate limit met; waiting 10 minutes")
       Sys.sleep(600)      
       zz<-getCurRateLimitInfo()  
-      print(paste("Twitter API:",zz$getRemainingHits(),"requests out of", zz$getHourlyLimit(), "remaining"))
+      print(paste("Twitter API:",zz$getRemainingHits(),"requests remaining out of", zz$getHourlyLimit(), "limit"))
    }
 }
 # lookupUsers in batches of 100 as required by the twitter API limits
@@ -114,11 +113,11 @@ batchedLookupUsers<-function(ids){
       cache.hit.ids = dbGetQuery(db,sql)[,"id"]
       #remove the cached ones from what will be looked up
       if(length(cache.hit.ids)>0){
-         ids<-ids[-(ids%in%cache.hit.ids)]
+         ids<-ids[!(ids%in%cache.hit.ids)]
       }
    }
+   print(paste("Loop-up User(s):",length(cache.hit.ids),"were cached,",length(ids),"will be fetched via API"))
    if(length(ids)>0){
-      print("Batched Loop-up User(s)")
       batches<-ceiling(length(ids)/100)
       users<-xLookupUsers(ids[1:min(100,length(ids))])
       if(batches>1){
@@ -133,10 +132,10 @@ batchedLookupUsers<-function(ids){
 }
 # lookupUsers with API hit throttling and retries
 xLookupUsers<-function(ids){
-   throttle()
    tries<-0
    done=FALSE
    while(!done && tries<3){
+      throttle()
       val<-tryCatch(lookupUsers(ids),
                     error=function(e) NULL)
       done<-!is.null(val)
@@ -146,14 +145,24 @@ xLookupUsers<-function(ids){
    if(is.null(val))stop(geterrmessage())
    return(val)
 }
-# get followers for a user with API hit throttling and retries
+# get followers for a user with API hit throttling and retries. as a list of 1 member, which is named as the id of the argument user
+#returns NA if a "Not authorized" error is thrown
 ufol<-function(x){
-   throttle()
    tries<-0
    done=FALSE
    while(!done && tries<3){
-      val<-tryCatch(x$getFollowerIDs(),
-                    error=function(e) NULL)
+      throttle()
+      val<-tryCatch({v<-list(x$getFollowerIDs())
+                     names(v)<-x$id
+                     v},
+                    error=function(e){
+                       if(e$message=="Error: Not authorized"){
+                          print(paste("Skipping:",e$message))
+                          NA
+                       }else{
+                          NULL
+                       }
+                    })
       done<-!is.null(val)
       tries<-tries+1
       Sys.sleep(1)
@@ -161,14 +170,24 @@ ufol<-function(x){
    if(is.null(val))stop(geterrmessage())
    return(val)
 }
-#get ids of people user is following
+#get ids of people user is following as a list of 1 member, which is named as the id of the argument user
+#returns NA if a "Not authorized" error is thrown
 ufri<-function(x){
-   throttle()
    tries<-0
    done=FALSE
    while(!done && tries<3){
-      val<-tryCatch(x$getFriendIDs(),
-                    error=function(e) NULL)
+      throttle()
+      val<-tryCatch({v<-list(x$getFriendIDs())
+                     names(v)<-x$id
+                     v},
+                    error=function(e){
+                       if(e$message=="Error: Not authorized"){
+                          print(paste("Skipping:",e$message))
+                          NA
+                        }else{
+                           NULL
+                        }
+                     })
       done<-!is.null(val)
       tries<-tries+1
       Sys.sleep(1)
@@ -184,12 +203,24 @@ cache.read.users<-function(ids){
    return(dbGetQuery(db,sql))
 }
 cache.read.following<-function(ids){
-   sql<-paste("SELECT followed_id as id FROM relation WHERE follower_id IN(",paste(ids, collapse=","),")")
-   return(dbGetQuery(db,sql)[,"id"])
+   following.list<-list()
+   for(id in ids){
+      sql<-paste("SELECT followed_id as id FROM relation WHERE follower_id =",q4sql(id))
+      fid<-list(dbGetQuery(db,sql)[,"id"])
+      names(fid)<-id
+      following.list<-c(following.list,fid)
+   }
+   return(following.list)
 }
 cache.read.followers<-function(ids){
-   sql<-paste("SELECT follower_id as id FROM relation WHERE followed_id IN(",paste(ids, collapse=","),")")
-   return(dbGetQuery(db,sql)[,"id"])
+   followed.list<-list()
+   for(id in ids){
+      sql<-paste("SELECT follower_id as id FROM relation WHERE followed_id =",q4sql(id))
+      fid<-list(dbGetQuery(db,sql)[,"id"])
+      names(fid)<-id
+      followed.list<-c(followed.list,fid)
+   }
+   return(followed.list)
 }
 
 ## database insert/update.
@@ -206,9 +237,13 @@ update.cache<-function(u,ufri, ufol){
       tryCatch({
          cache.insert.user(u)
          tryCatch({
-            cache.insert.followers(u[["id"]], ufol)
+            if(!is.na(ufol)){
+               cache.insert.followers(u[["id"]], ufol)
+            }
             tryCatch({
-               cache.insert.friends(u[["id"]], ufri)
+               if(!is.na(ufri)){
+                  cache.insert.friends(u[["id"]], ufri)
+               }
                dbCommit(db)
                }, error = didFail)
             }, error = didFail)
@@ -228,18 +263,11 @@ cache.insert.user<-function(u){
                   screen_name=u[["screenName"]],
                   location=u[["location"]],
                   id=u[["id"]],
-                  cache_date=Sys.Date(),
+                  cache_date=as.character(Sys.Date()),
                   stringsAsFactors=FALSE)
    dbSendPreparedQuery(db, sqlTemplate, bind.data = df)
 }
-# q4sql(u[["description"]]),",",
-# u[["statusesCount"]],",",
-# q4sql(u[["name"]]),",",
-# q4sql(u[["created"]]),",",
-# q4sql(u[["screenName"]]),",",
-# q4sql(u[["location"]]),",",
-# q4sql(u[["id"]]),",",
-# q4sql(Sys.Date()),
+
 cache.insert.followers<-function(uid, ids){
    #remove all existing followers (some people may have stopped)
    sql.clear<-paste("DELETE FROM relation WHERE followed_id =", as.character(uid))
@@ -264,6 +292,7 @@ cache.insert.friends<-function(uid, ids){
 ## MAIN - RUN.TYPE = "USERS"
 ## *******************************
 # Prepare for 1st time. Get Twitter IDs to match the supplied screen names.
+throttle(length(uids)*3)
 loop.ids<-sapply(lookupUsers(start.sns), uids)
 ## Loop to required depth
 for(d in 0:depth){
@@ -278,8 +307,8 @@ for(d in 0:depth){
    #deal with cached users - look up their attributes and followers/friends info
    if(length(lu$cached)>0){
       loop.users.df<-cache.read.users(lu$cached)
-      loop.following<-list(cache.read.following(lu$cached))
-      loop.followers<-list(cache.read.followers(lu$cached))
+      loop.following<-cache.read.following(lu$cached)
+      loop.followers<-cache.read.followers(lu$cached)
    }
    #now deal with uncached users - extract attributes
    loop.users.uncached<-lu$users
@@ -290,18 +319,28 @@ for(d in 0:depth){
       # could also be done with loop.followers<-lapply(loop.users, ufol) but I want to watch progress of API calls
       for(u in loop.users.uncached){
          print(paste("For user id=",u[["id"]]))
-         print("Getting friends")
-         u.friends<-ufri(u)
-         loop.following<-c(loop.following, list(u.friends))
-         print("Getting followers")
-         u.followers<-ufol(u)
-         loop.followers<-c(loop.followers, list(u.followers))
+         if(as.numeric(u[["friendsCount"]])>0){
+            print("Getting friends")
+            u.friends<-ufri(u)
+            if(!is.na(u.friends)){
+               loop.following<-c(loop.following, u.friends)
+            }
+         }else{
+            print("0 friends")
+         }
+         if(as.numeric(u[["followersCount"]])>0){
+            print("Getting followers")
+            u.followers<-ufol(u)
+            if(!is.na(u.followers)){
+               loop.followers<-c(loop.followers, u.followers)
+            }
+         }else{
+            print("0 followers")
+         }
          #save user and associated friends/followers to cache.
-         #NB: TO DO. this should remove any followed users that are not already known (i.e. are within the depth specified) on the last iteration (on non-final iterations we must retain the ids for the next loop)
-         update.cache(u,u.friends, u.followers)
+         #NB: when d==depth, this caches friends/followers that will not be part of the graph BUT these may be necessary for future runs
+         update.cache(u,u.friends[[1]], u.followers[[1]])
       }
-      names(loop.followers)<-loop.ids
-      names(loop.following)<-loop.ids
    }
    
    #accumulate loop data A - the users
@@ -403,12 +442,8 @@ if(run.type=="users"){
 data.file<-paste(output.dir,paste(run.name,"RData",sep="."),sep="/")
 info.file<-paste(output.dir,paste(run.name,"txt",sep="."),sep="/")
 save(twitter.net, file=data.file)
-sink(file=info.file, split=TRUE, type="output")
-cat(paste("run.type",run.type,sep="= "))
-cat(paste("\r\nrun.date",run.date,sep="= "))
-cat(paste("\r\nstart.sns",start.sns,sep="= "))
-cat(paste("\r\ndepth",depth,sep="= "))
-cat(paste("\r\nhash.tags",hash.tags,sep="= "))
-sink()#close
-
-
+cat(paste("run.type",run.type,sep="= "), file=info.file, append=FALSE, sep="\n")
+cat(paste("run.date",run.date,sep="= "), file=info.file, append=TRUE, sep="\n")
+cat(paste("start.sns",start.sns,sep="= "), file=info.file, append=TRUE, sep="\n")
+cat(paste("depth",depth,sep="= "), file=info.file, append=TRUE, sep="\n")
+cat(paste("hash.tags",hash.tags,sep="= "), file=info.file, append=TRUE, sep="\n")
