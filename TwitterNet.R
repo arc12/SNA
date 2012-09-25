@@ -6,6 +6,7 @@
 library("network")
 library("twitteR")
 library("RSQLite")
+library("ROAuth")
 
 ## !!!!!!!!!!!!
 ## NB
@@ -16,6 +17,12 @@ library("RSQLite")
 #  (so may fail for large follower counts, for example)
 # NB3: Does not make authenticated access, which will limit visibility (and rate limits below 350/hr)
 # NB4: Caches data to a SQLite database and uses cached data if within cache.life age limit
+
+## ****************
+## OUTPUT FILE SPEC
+## ****************
+run.name<-"test-1"
+output.dir<-"/home/arc1/R Projects/SNA Output/TwitterNet"
 
 ## ****************
 ## RUN PARAMS
@@ -57,18 +64,15 @@ ut.recent.tweets<-20
 # C) they are listed in greylist.sns, in which case the user record is added but friends/followers are ignored
 followers.limit<-5000
 #whitelist - suggest include anyone who is genuinely ed tech
-whitelist.sns<-c("JISC", "pgsimoes", "mikeherrity")
-greylist.sns<-c("stephenfry","BillBailey","nationaltrust","BBCTech","GdnHigherEd","TEDNews", "WiredUK",
-                "timeshighered", "guardiantech", "BBCClick", "OpenGov", "billt", "persdevquotes",
-                "educause", "SirKenRobinson","Avaaz","w3c")
+whitelist.sns<-c("JISC", "pgsimoes", "mikeherrity","charlieanna")
+greylist.sns<-c("stephenfry","BillBailey","nationaltrust",
+                "BBCTech",
+                "GdnHigherEd","TEDNews", "WiredUK", "timeshighered", "guardiantech", "BBCClick",
+                "OpenGov", "billt", "persdevquotes",
+                "educause", "Avaaz","w3c",
+                "SirKenRobinson", "st_ffen")
 #always whitelist starts
 whitelist.sns<-c(start.sns,whitelist.sns)
-
-## ****************
-## OUTPUT FILE SPEC
-## ****************
-run.name<-"test-1"
-output.dir<-"/home/arc1/R Projects/SNA Output/TwitterNet"
 
 ## *******************
 ## ADDITIONAL METADATA
@@ -81,6 +85,9 @@ run.date <- as.POSIXlt(Sys.time(), "UTC")
 if(run.type!="users"){
    stop(" run.type NOT IMPLEMENTED")
 }
+#Twitter OAuth prep
+load(file="oAuthCred.RData")
+registerTwitterOAuth(cred)
 # database prep
 use.cache<-FALSE
 if(cache.life>=0){
