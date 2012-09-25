@@ -33,7 +33,7 @@ cache.life<-14
 cache.db.filename<-"/home/arc1/R Projects/SNA/Source Data/TwitterNet.sqlite"
 # >>>> parameters if type="users"
 # which twitter screen names to use as the start-point from which to explore followers/following
-start.sns<- c("christismart")
+start.sns<- c("jisccetis")
 #c("LornaMCampbell","asimong","mhawksey","PaulHollins","wilm","sheilmcn","dwrgi","markpower","christismart","scottbw") #cetis staff
 # c("jisccetis") # CETIS comms account
 # how many edges to traverse to locate nodes (i.e. depth). 0 means only use start.ids
@@ -45,6 +45,24 @@ ht.recent.tweets<-20
 # >>>> parameters if type="user-tags"
 # how many tweets to mine for hash tags
 ut.recent.tweets<-20 
+
+##
+## Dealing with "celebrities" and similar
+##
+#The problem here is that some twitter users have very large numbers of followers and if we traverse these
+# to make the graph, it gets un-weildly.
+# Approach taken is to force a program stop when #followers exceeds the limit below to allow the user to decide what to do UNLESS:
+# A) they are listed in start.sns (when their followers/friends are included)
+# B) they are listed in whitelist.sns, in which case their friends/followers are included
+# C) they are listed in greylist.sns, in which case the user record is added but friends/followers are ignored
+followers.limit<-5000
+#whitelist - suggest include anyone who is genuinely ed tech
+whitelist.sns<-c("JISC", "pgsimoes", "mikeherrity")
+greylist.sns<-c("stephenfry","BillBailey","nationaltrust","BBCTech","GdnHigherEd","TEDNews", "WiredUK",
+                "timeshighered", "guardiantech", "BBCClick", "OpenGov", "billt", "persdevquotes",
+                "educause", "SirKenRobinson","Avaaz","w3c")
+#always whitelist starts
+whitelist.sns<-c(start.sns,whitelist.sns)
 
 ## ****************
 ## OUTPUT FILE SPEC
@@ -93,7 +111,7 @@ q4sql<-function(d){
 # throttle will force delay when the twitter request rate limits are reached. margin is the number of remaining hits at which a delay is inserted.
 throttle<-function(margin=5){
    zz<-getCurRateLimitInfo()
-   print(paste("Check Throttle:",zz$getRemainingHits(),"requests remaining out of", zz$getHourlyLimit(), "limit"))
+   print(paste("Check Limit:",zz$getRemainingHits(),"requests remaining out of", zz$getHourlyLimit(), "limit"))
    while(zz$getRemainingHits()<=margin){
       print("Twitter rate limit met; waiting 10 minutes")
       Sys.sleep(600)      
@@ -231,17 +249,17 @@ didFail <- function(e){
 }
 # done as a single transaction since the "cache_date" refers to the user and all relations.
 #arguments are: a single user object, vectors of friends and followers
-update.cache<-function(u,ufri, ufol){
+update.cache<-function(u,ufri, ufol, greylisted){
    tryCatch({      
       dbBeginTransaction(db)
       tryCatch({
-         cache.insert.user(u)
+         cache.insert.user(u, greylisted)
          tryCatch({
-            if(!is.na(ufol)){
+            if(!is.na(ufol[1])){
                cache.insert.followers(u[["id"]], ufol)
             }
             tryCatch({
-               if(!is.na(ufri)){
+               if(!is.na(ufri[1])){
                   cache.insert.friends(u[["id"]], ufri)
                }
                dbCommit(db)
@@ -251,11 +269,11 @@ update.cache<-function(u,ufri, ufol){
 
    }, error = didFail)
 } 
-cache.insert.user<-function(u){
+cache.insert.user<-function(u,greylisted){
    #use a prepared query style since description may contain characters that will mess up SQL created with paste()
    sqlTemplate<-paste("INSERT OR REPLACE INTO user",
-                  "(description, status_count, name, created, screen_name, location, id, cache_date)",
-                  "VALUES($description, $status_count, $name, $created, $screen_name, $location, $id, $cache_date)")
+                  "(description, status_count, name, created, screen_name, location, id, cache_date, greylisted)",
+                  "VALUES($description, $status_count, $name, $created, $screen_name, $location, $id, $cache_date, $greylisted)")
    df<-data.frame(description=u[["description"]],
                   status_count=u[["statusesCount"]],
                   name=u[["name"]],
@@ -264,6 +282,7 @@ cache.insert.user<-function(u){
                   location=u[["location"]],
                   id=u[["id"]],
                   cache_date=as.character(Sys.Date()),
+                  greylisted = as.numeric(greylisted),
                   stringsAsFactors=FALSE)
    dbSendPreparedQuery(db, sqlTemplate, bind.data = df)
 }
@@ -318,28 +337,43 @@ for(d in 0:depth){
       # build a list of vectors containing twitter IDs for each loop user
       # could also be done with loop.followers<-lapply(loop.users, ufol) but I want to watch progress of API calls
       for(u in loop.users.uncached){
-         print(paste("For user id=",u[["id"]]))
-         if(as.numeric(u[["friendsCount"]])>0){
-            print("Getting friends")
-            u.friends<-ufri(u)
-            if(!is.na(u.friends)){
-               loop.following<-c(loop.following, u.friends)
+         print(paste("For user id=",u$id,"screen name=",u$screenName,"#followers=",u$followersCount, "#friends=",u$friendsCount))
+         #check for excessive followers and consult whitelist/greylist if necessary
+         do.followers<-TRUE
+         if(as.numeric(u$followersCount)>followers.limit){
+            if(!(u$screenName%in%whitelist.sns)){
+               if(!(u$screenName%in%greylist.sns)){
+                  stop("User with excessive followers detected. Add their screen name to whitelist.sns or greylist.sns and restart to process")
+               }
+               print("Grey-listed: adding user but skipping their network")
+               do.followers<-FALSE
             }
-         }else{
-            print("0 friends")
          }
-         if(as.numeric(u[["followersCount"]])>0){
-            print("Getting followers")
-            u.followers<-ufol(u)
-            if(!is.na(u.followers)){
-               loop.followers<-c(loop.followers, u.followers)
+         #fallback values
+         u.friends<-NA
+         u.followers<-NA
+         #get the friends and followers
+         if(do.followers){
+            if(as.numeric(u[["friendsCount"]])>0){
+               u.friends<-ufri(u)
+               if(!is.na(u.friends[[1]][1])){
+                  loop.following<-c(loop.following, u.friends)
+               }
+            }else{
+               print("0 friends")
             }
-         }else{
-            print("0 followers")
+            if(as.numeric(u[["followersCount"]])>0){
+               u.followers<-ufol(u)
+               if(!is.na(u.followers[[1]][1])){
+                  loop.followers<-c(loop.followers, u.followers)
+               }
+            }else{
+               print("0 followers")
+            }
          }
          #save user and associated friends/followers to cache.
          #NB: when d==depth, this caches friends/followers that will not be part of the graph BUT these may be necessary for future runs
-         update.cache(u,u.friends[[1]], u.followers[[1]])
+         update.cache(u,u.friends[[1]], u.followers[[1]], !do.followers)
       }
    }
    
