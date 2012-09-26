@@ -34,6 +34,7 @@ output.dir<-"/home/arc1/R Projects/SNA Output/TwitterNet"
 #                 (overrides the hash.tags parameter)
 run.type<-"users"
 # Use cache values if <= cache.life days old. A value less than zero disables any database use
+# Recommend to use caching unless a graph can  be created within API rate limits.
 # The cached data is a user's attributes and all followers/friends.
 cache.life<-14
 #name of the SQLite database file to use
@@ -63,14 +64,14 @@ ut.recent.tweets<-20
 # B) they are listed in whitelist.sns, in which case their friends/followers are included
 # C) they are listed in greylist.sns, in which case the user record is added but friends/followers are ignored
 followers.limit<-5000
-#whitelist - suggest include anyone who is genuinely ed tech
-whitelist.sns<-c("JISC", "pgsimoes", "mikeherrity","charlieanna")
+#whitelist - suggest include anyone who is genuinely ed or tech (maybe out of our sector)
+whitelist.sns<-c("JISC", "pgsimoes", "mikeherrity","charlieanna", "justinmenard")
 greylist.sns<-c("stephenfry","BillBailey","nationaltrust",
-                "BBCTech",
+                "BBCTech", "DesignHappyUK", "neuroscience",
                 "GdnHigherEd","TEDNews", "WiredUK", "timeshighered", "guardiantech", "BBCClick",
-                "OpenGov", "billt", "persdevquotes",
+                "OpenGov", "persdevquotes",
                 "educause", "Avaaz","w3c",
-                "SirKenRobinson", "st_ffen")
+                "SirKenRobinson", "st_ffen", "billt") #last line may be white list candidates?
 #always whitelist starts
 whitelist.sns<-c(start.sns,whitelist.sns)
 
@@ -115,15 +116,22 @@ if(use.cache){
 q4sql<-function(d){
    return (paste("'",as.character(d),"'", sep=""))
 }
-# throttle will force delay when the twitter request rate limits are reached. margin is the number of remaining hits at which a delay is inserted.
+# throttle will check API limits and either:
+# A) if caching in use, will stop execution
+# B) if no caching will force delay
+# margin is the number of remaining hits at which a delay is inserted. Some twitteR methods need >1 API access so a margin>1 is recommended to avoid the limit (paranoid twitter will blacklist persistent limit-reachers)
 throttle<-function(margin=5){
    zz<-getCurRateLimitInfo()
    print(paste("Check Limit:",zz$getRemainingHits(),"requests remaining out of", zz$getHourlyLimit(), "limit"))
-   while(zz$getRemainingHits()<=margin){
-      print("Twitter rate limit met; waiting 10 minutes")
-      Sys.sleep(600)      
-      zz<-getCurRateLimitInfo()  
-      print(paste("Twitter API:",zz$getRemainingHits(),"requests remaining out of", zz$getHourlyLimit(), "limit"))
+   if(use.cache){
+      stop("STOPPING: Twitter API limit being approached. Please restart in an hour.", call.=FALSE)
+   }else{
+      while(zz$getRemainingHits()<=margin){
+         print("Twitter rate limit met; waiting 60 minutes")
+         Sys.sleep(3600)      
+         zz<-getCurRateLimitInfo()  
+         print(paste("Twitter API:",zz$getRemainingHits(),"requests remaining out of", zz$getHourlyLimit(), "limit"))
+      }
    }
 }
 # lookupUsers in batches of 100 as required by the twitter API limits
@@ -176,23 +184,26 @@ ufol<-function(x){
    tries<-0
    done=FALSE
    while(!done && tries<3){
-      throttle()
-      val<-tryCatch({v<-list(x$getFollowerIDs())
-                     names(v)<-x$id
-                     v},
-                    error=function(e){
-                       if(e$message=="Error: Not authorized"){
-                          print(paste("Skipping:",e$message))
-                          NA
-                       }else{
-                          NULL
-                       }
-                    })
-      done<-!is.null(val)
-      tries<-tries+1
-      Sys.sleep(1)
+      val<-NA
+      if(!(x$protected)){
+         throttle()
+         val<-tryCatch({v<-list(x$getFollowerIDs())
+                        names(v)<-x$id
+                        v},
+                       error=function(e){
+                          if((e$message=="Error: Not authorized")||(e$message=="Error: Unauthorized")){
+                             print(paste("Skipping:",e$message))
+                             NA
+                          }else{
+                             NULL
+                          }
+                       })
+         done<-!is.null(val)
+         tries<-tries+1
+         Sys.sleep(1)
+      }
+      if(is.null(val))stop(geterrmessage())
    }
-   if(is.null(val))stop(geterrmessage())
    return(val)
 }
 #get ids of people user is following as a list of 1 member, which is named as the id of the argument user
@@ -201,23 +212,26 @@ ufri<-function(x){
    tries<-0
    done=FALSE
    while(!done && tries<3){
-      throttle()
-      val<-tryCatch({v<-list(x$getFriendIDs())
-                     names(v)<-x$id
-                     v},
-                    error=function(e){
-                       if(e$message=="Error: Not authorized"){
-                          print(paste("Skipping:",e$message))
-                          NA
-                        }else{
-                           NULL
-                        }
-                     })
-      done<-!is.null(val)
-      tries<-tries+1
-      Sys.sleep(1)
+      val<-NA
+      if(!(x$protected)){
+         throttle()
+         val<-tryCatch({v<-list(x$getFriendIDs())
+                        names(v)<-x$id
+                        v},
+                       error=function(e){
+                          if((e$message=="Error: Not authorized")||(e$message=="Error: Unauthorized")){
+                             print(paste("Skipping:",e$message))
+                             NA
+                          }else{
+                             NULL
+                          }
+                       })
+         done<-!is.null(val)
+         tries<-tries+1
+         Sys.sleep(1)
+      }
+      if(is.null(val))stop(geterrmessage())
    }
-   if(is.null(val))stop(geterrmessage())
    return(val)
 }
 uids<-function(x){x$getId()}
@@ -347,14 +361,19 @@ for(d in 0:depth){
          print(paste("For user id=",u$id,"screen name=",u$screenName,"#followers=",u$followersCount, "#friends=",u$friendsCount))
          #check for excessive followers and consult whitelist/greylist if necessary
          do.followers<-TRUE
-         if(as.numeric(u$followersCount)>followers.limit){
+         if(!(u$protected) && (as.numeric(u$followersCount)>followers.limit)){
             if(!(u$screenName%in%whitelist.sns)){
                if(!(u$screenName%in%greylist.sns)){
-                  stop("User with excessive followers detected. Add their screen name to whitelist.sns or greylist.sns and restart to process")
+                  stop("User with excessive followers detected. Add their screen name to whitelist.sns or greylist.sns and restart to process", call.=FALSE)
                }
                print("Grey-listed: adding user but skipping their network")
                do.followers<-FALSE
             }
+         }
+         #if we try to get followers for a protected user, a not authorized error would occur
+         if(u$protected){
+            print("PROTECTED: skipping friends and followers")
+            do.followers<-FALSE
          }
          #fallback values
          u.friends<-NA
