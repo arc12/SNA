@@ -21,7 +21,7 @@ library("ROAuth")
 ## ****************
 ## OUTPUT FILE SPEC
 ## ****************
-run.name<-"test-1"
+run.name<-"LornaMCampbell-1"
 output.dir<-"/home/arc1/R Projects/SNA Output/TwitterNet"
 
 ## ****************
@@ -41,7 +41,7 @@ cache.life<-14
 cache.db.filename<-"/home/arc1/R Projects/SNA/Source Data/TwitterNet.sqlite"
 # >>>> parameters if type="users"
 # which twitter screen names to use as the start-point from which to explore followers/following
-start.sns<- c("jisccetis")
+start.sns<- c("LornaMCampbell")
 #c("LornaMCampbell","asimong","mhawksey","PaulHollins","wilm","sheilmcn","dwrgi","markpower","christismart","scottbw") #cetis staff
 # c("jisccetis") # CETIS comms account
 # how many edges to traverse to locate nodes (i.e. depth). 0 means only use start.ids
@@ -65,12 +65,16 @@ ut.recent.tweets<-20
 # C) they are listed in greylist.sns, in which case the user record is added but friends/followers are ignored
 followers.limit<-5000
 #whitelist - suggest include anyone who is genuinely ed or tech (maybe out of our sector)
-whitelist.sns<-c("JISC", "pgsimoes", "mikeherrity","charlieanna", "justinmenard")
-greylist.sns<-c("stephenfry","BillBailey","nationaltrust",
+whitelist.sns<-c("JISC", "pgsimoes", "mikeherrity","charlieanna", "justinmenard", "josiefraser", "OKFN",
+                 "PaulMiller")
+greylist.sns<-c("stephenfry","BillBailey","nationaltrust", "N_T_S", "2rescuedogs", "Xerposa",
+                "edwardjolmos",
                 "BBCTech", "DesignHappyUK", "neuroscience",
                 "GdnHigherEd","TEDNews", "WiredUK", "timeshighered", "guardiantech", "BBCClick",
-                "OpenGov", "persdevquotes",
-                "educause", "Avaaz","w3c",
+                "OpenGov", "persdevquotes", "LSEImpactBlog", "bisgovuk", "HEFCE",
+                "Avaaz", "UK_Together", "RebelMouse", "w3c",
+                "educause", "BongoDev",
+                "barrylibert",
                 "SirKenRobinson", "st_ffen", "billt") #last line may be white list candidates?
 #always whitelist starts
 whitelist.sns<-c(start.sns,whitelist.sns)
@@ -124,7 +128,9 @@ throttle<-function(margin=5){
    zz<-getCurRateLimitInfo()
    print(paste("Check Limit:",zz$getRemainingHits(),"requests remaining out of", zz$getHourlyLimit(), "limit"))
    if(use.cache){
-      stop("STOPPING: Twitter API limit being approached. Please restart in an hour.", call.=FALSE)
+      if(zz$getRemainingHits()<=margin){
+         stop("STOPPING: Twitter API limit being approached. Please restart in an hour.", call.=FALSE)
+      }
    }else{
       while(zz$getRemainingHits()<=margin){
          print("Twitter rate limit met; waiting 60 minutes")
@@ -190,14 +196,7 @@ ufol<-function(x){
          val<-tryCatch({v<-list(x$getFollowerIDs())
                         names(v)<-x$id
                         v},
-                       error=function(e){
-                          if((e$message=="Error: Not authorized")||(e$message=="Error: Unauthorized")){
-                             print(paste("Skipping:",e$message))
-                             NA
-                          }else{
-                             NULL
-                          }
-                       })
+                       error=function(e) NULL)
          done<-!is.null(val)
          tries<-tries+1
          Sys.sleep(1)
@@ -218,14 +217,7 @@ ufri<-function(x){
          val<-tryCatch({v<-list(x$getFriendIDs())
                         names(v)<-x$id
                         v},
-                       error=function(e){
-                          if((e$message=="Error: Not authorized")||(e$message=="Error: Unauthorized")){
-                             print(paste("Skipping:",e$message))
-                             NA
-                          }else{
-                             NULL
-                          }
-                       })
+                       error=function(e) NULL)
          done<-!is.null(val)
          tries<-tries+1
          Sys.sleep(1)
