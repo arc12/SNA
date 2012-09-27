@@ -69,7 +69,7 @@ whitelist.sns<-c("JISC", "pgsimoes", "mikeherrity","charlieanna", "justinmenard"
                  "PaulMiller")
 greylist.sns<-c("stephenfry","BillBailey","nationaltrust", "N_T_S", "2rescuedogs", "Xerposa",
                 "edwardjolmos",
-                "BBCTech", "DesignHappyUK", "neuroscience",
+                "BBCTech", "DesignHappyUK", "neuroscience", "naxosrecords",
                 "GdnHigherEd","TEDNews", "WiredUK", "timeshighered", "guardiantech", "BBCClick",
                 "OpenGov", "persdevquotes", "LSEImpactBlog", "bisgovuk", "HEFCE",
                 "Avaaz", "UK_Together", "RebelMouse", "w3c",
