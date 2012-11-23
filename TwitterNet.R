@@ -13,7 +13,7 @@ library("ROAuth")
 ## !!!!!!!!!!!!
 # NB1: The network is DIRECTED, where the edge direction is the "follows" direction.
 #  Hence if A follows B then there is an edge from vertex A TO vertex B.
-# NB2: This code may not fully take account of twitter API rate limits (150/hr).
+# NB2: This code may not fully take account of twitter API rate limits (350/hr with oAuth).
 #  (so may fail for large follower counts, for example)
 # NB3: Does not make authenticated access, which will limit visibility (and rate limits below 350/hr)
 # NB4: Caches data to a SQLite database and uses cached data if within cache.life age limit
@@ -21,7 +21,7 @@ library("ROAuth")
 ## ****************
 ## OUTPUT FILE SPEC
 ## ****************
-run.name<-"LornaMCampbell-1"
+run.name<-"JISC_and_CETIS-1"
 output.dir<-"/home/arc1/R Projects/SNA Output/TwitterNet"
 
 ## ****************
@@ -41,11 +41,14 @@ cache.life<-14
 cache.db.filename<-"/home/arc1/R Projects/SNA/Source Data/TwitterNet.sqlite"
 # >>>> parameters if type="users"
 # which twitter screen names to use as the start-point from which to explore followers/following
-start.sns<- c("LornaMCampbell")
-#c("LornaMCampbell","asimong","mhawksey","PaulHollins","wilm","sheilmcn","dwrgi","markpower","christismart","scottbw") #cetis staff
+#start.sns<- c("ectel2012")
+start.sns<-c("LornaMCampbell","asimong","mhawksey","PaulHollins","wilm","sheilmcn","dwrgi","markpower","christismart","scottbw") #cetis staff
+start.sns<-c(start.sns,"sarahknight","stephensmaggie","ljanegray","p_bailey","dkernohan","Rob_work","paolamarchionni", 
+"PFindlayJISC","andymcg","mdovey","simonhodson99","rachelbruce","ambrouk","b_notay","neilgrindley",
+"chriscb","torstenreimer","benshowers","Lawrie","robbristow","mylesdanson")
 # c("jisccetis") # CETIS comms account
 # how many edges to traverse to locate nodes (i.e. depth). 0 means only use start.ids
-depth<-1
+depth<-0
 # >>>> parameters if type="hash-tags"
 hash.tags<-c()
 # how many tweets to mine for users
@@ -66,15 +69,18 @@ ut.recent.tweets<-20
 followers.limit<-5000
 #whitelist - suggest include anyone who is genuinely ed or tech (maybe out of our sector)
 whitelist.sns<-c("JISC", "pgsimoes", "mikeherrity","charlieanna", "justinmenard", "josiefraser", "OKFN",
-                 "PaulMiller")
-greylist.sns<-c("stephenfry","BillBailey","nationaltrust", "N_T_S", "2rescuedogs", "Xerposa",
-                "edwardjolmos",
-                "BBCTech", "DesignHappyUK", "neuroscience", "naxosrecords",
-                "GdnHigherEd","TEDNews", "WiredUK", "timeshighered", "guardiantech", "BBCClick",
+                 "PaulMiller","gsiemens","audreywatters","davecormier","russell1955", "hrheingold")
+greylist.sns<-c("stephenfry","BillBailey","nationaltrust", "N_T_S", "2rescuedogs", "Xerposa", "clarebalding1",
+                "edwardjolmos", "IUBro", "BBCSoundEffects", "ukwarcabinet", "GlasgowCC", "BBCBreaking",
+                "MakeAWishUK", "Amanda_Vickery", "TimesArchive", "PompeyDockyard", "navalhistoryguy", "NtlMuseumsScot",
+                "samuelpepys", "AJEnglish", "twibbon", "UCLanticuts", "DrSamuelJohnson", "Dropbox",
+                "BBCTech", "DesignHappyUK", "neuroscience", "naxosrecords", "NoradSanta", "LoNFeed",
+                "HistoryToday", "Jennigan", "GlasgowWarriors", "LiveJournal", "RealTimeWWII", "thedailymash",
+                "GdnHigherEd","TEDNews", "WiredUK", "timeshighered", "guardiantech", "BBCClick", "BBC_magazine",
                 "OpenGov", "persdevquotes", "LSEImpactBlog", "bisgovuk", "HEFCE",
-                "Avaaz", "UK_Together", "RebelMouse", "w3c",
-                "educause", "BongoDev",
-                "barrylibert",
+                "Avaaz", "UK_Together", "RebelMouse", "w3c", "MarsCuriosity", "thelistmagazine", "Oatmeal",
+                "educause", "BongoDev", "creativecommons", "womenintech", "TED_TALKS", "zephoria",
+                "barrylibert", "timberners_lee","bengoldacre",
                 "SirKenRobinson", "st_ffen", "billt") #last line may be white list candidates?
 #always whitelist starts
 whitelist.sns<-c(start.sns,whitelist.sns)
@@ -458,7 +464,7 @@ twitter.net<-network.initialize(length(all.users.df[,1]), directed=TRUE, hyper=F
 # add select attributes to the vertices
 set.vertex.attribute(twitter.net, "name", as.character(all.users.df[,"name"]))
 set.vertex.attribute(twitter.net, "created", as.character(all.users.df[,"created"]))
-set.vertex.attribute(twitter.net, "statusesCount", as.character(all.users.df[,"statusesCount"]))
+set.vertex.attribute(twitter.net, "statusesCount", as.numeric(all.users.df[,"statusesCount"]))
 set.vertex.attribute(twitter.net, "location", as.character(all.users.df[,"location"]))
 set.vertex.attribute(twitter.net, "id", as.character(all.users.df[,"id"]))
 network.vertex.names(twitter.net)<-as.character(all.users.df[,"screenName"])
@@ -474,7 +480,7 @@ for(s in senders){
 }
 
 #take a peek to see if it looks OK
-plot(twitter.net, displaylabels=T, label.cex=0.7, boxed.labels=TRUE)
+plot(twitter.net, displaylabels=T, label.cex=0.7, boxed.labels=FALSE)
 
 ## **************************
 ## STORE NETWORK LEVEL METADATA IN THE OBJECT
